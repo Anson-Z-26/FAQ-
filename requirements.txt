@@ -1,0 +1,35 @@
+# 运行依赖（按项目实际 import 整理，版本为已验证可用的组合）
+# 安装：venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# --- Web 服务 ---
+fastapi==0.141.1
+uvicorn==0.54.0
+starlette==1.6.0
+anyio==4.15.1
+
+# --- 数据校验（FastAPI 依赖，显式列出便于复现） ---
+pydantic==2.13.5
+pydantic_core==2.46.5
+annotated-types==0.8.0
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+
+# --- 向量检索 ---
+faiss-cpu==1.15.1
+numpy==2.4.6
+
+# --- 配置读取与 HTTP 客户端 ---
+python-dotenv==1.2.3
+requests==2.34.2
+
+# --- requests 的底层依赖，显式列出以保证可复现 ---
+urllib3==2.8.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.20
+
+# --- 可选（暂未列入必需） ---
+# peewee==4.5.1 只有 db/database.py 这一个遗留 SQLite 层在用，
+# 而该模块当前没有被主流程导入（且它自身还缺 db/init.py，导入即失败）。
+# 若决定启用那套 SQLite 知识库，取消下一行注释：
+# peewee==4.5.1

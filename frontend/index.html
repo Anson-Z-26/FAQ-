@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能问答助手</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">问</div>
+        <div class="brand-text">
+          <h1 id="app-title">智能问答助手</h1>
+          <p class="subtitle">基于知识库的语义检索问答</p>
+        </div>
+      </div>
+
+      <div class="actions">
+        <!-- 查询地图跳转按钮：地址来自后端 QUERY_MAP_URL，未配置时自动置灰 -->
+        <a id="map-btn" class="btn btn-map" href="#" target="_blank" rel="noopener noreferrer">
+          <span class="ico" aria-hidden="true">📍</span>
+          <span>查询地图</span>
+        </a>
+        <button id="status-btn" class="btn btn-ghost" type="button" title="查看服务状态">
+          <span id="status-dot" class="dot"></span>
+          <span id="status-text">连接中</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- 状态提示条（索引未就绪等） -->
+    <div id="banner" class="banner hidden" role="alert"></div>
+
+    <!-- 对话区 -->
+    <main id="messages" class="messages" aria-live="polite">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon">💬</div>
+        <h2>有什么可以帮您？</h2>
+        <p>输入问题后，系统会从知识库中检索最相关的内容。</p>
+        <div class="suggestions" id="suggestions"></div>
+      </div>
+    </main>
+
+    <!-- 输入区 -->
+    <form id="ask-form" class="composer" autocomplete="off">
+      <input id="query-input" type="text" placeholder="请输入您的问题，例如：学校在哪" maxlength="200" required>
+      <button id="send-btn" class="btn btn-send" type="submit">
+        <span class="send-label">发送</span>
+      </button>
+    </form>
+
+    <footer class="footnote">
+      回答内容来自本地知识库检索；若显示「未找到」，说明知识库中没有相近内容。
+    </footer>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
