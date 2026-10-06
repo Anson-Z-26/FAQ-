@@ -6,7 +6,8 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# 本脚本在 tests/ 下，项目根目录是其上一级；加入 sys.path 才能 import service
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from service import NoopReranker, RAGService, Settings
 

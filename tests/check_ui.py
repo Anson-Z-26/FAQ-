@@ -1,4 +1,10 @@
-"""前端与接口联调验证。"""
+"""前端与接口联调验证。
+
+用法（需先启动服务）：
+    venv\\Scripts\\python.exe tests\\check_ui.py
+
+只发 HTTP 请求，不依赖本地文件路径，所以在哪个目录执行都可以。
+"""
 import json
 
 import requests

@@ -3,10 +3,10 @@
 目的：把「检索到底好不好」量化成一个数字，这样之后加 rerank、换 embedding 模型、
 扩大资料库时，能看出是变好了还是变差了，而不是凭感觉调参。
 
-用法：
-    venv\\Scripts\\python.exe eval_retrieval.py
-    venv\\Scripts\\python.exe eval_retrieval.py --model text-embedding-v3   # 换模型对比
-    venv\\Scripts\\python.exe eval_retrieval.py --k 5 --json before.json    # 存档，用于前后对比
+用法（在项目根目录执行）：
+    venv\\Scripts\\python.exe tests\\eval_retrieval.py
+    venv\\Scripts\\python.exe tests\\eval_retrieval.py --model text-embedding-v3   # 换模型对比
+    venv\\Scripts\\python.exe tests\\eval_retrieval.py --k 5 --json before.json    # 存档对比
 
 指标口径（刻意分开，便于定位病因）：
     Top-1      : 排第一的是不是正确答案        —— 反映「排序质量」
@@ -28,7 +28,8 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# 本脚本在 tests/ 下，项目根目录是其上一级；加入 sys.path 才能 import service
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from service import RAGService, Settings, VectorIndex, get_embeddings, load_knowledge
 

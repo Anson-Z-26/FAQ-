@@ -1,20 +1,23 @@
 """离线链路自检：用假 embedding 替换真实接口，确认双索引全链路代码是通的。
 
-不访问网络，不消耗额度。真实效果请用 build_index.py + eval_retrieval.py。
+不访问网络，不消耗额度。真实效果请用 build_index.py + tests/eval_retrieval.py。
 
 假向量只是「确定性字符哈希」，没有真实语义。它的作用是验证
 「知识库读取 → 问题/答案分别向量化 → 双索引落盘 → 重新加载
   → 双路召回 → 合并去重 → rerank → 拼装上下文」
 每一环都能跑通，而不是验证检索准确率。所以「命中 0 条」在这里属预期。
 
-运行：venv\\Scripts\\python.exe _selftest.py
+运行（在项目根目录执行）：
+    venv\\Scripts\\python.exe tests\\_selftest.py
 """
 import sys
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# 本脚本在 tests/ 下，项目根目录是其上一级；加入 sys.path 才能 import service
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from service import NoopReranker, RAGService, Reranker, Settings, VectorIndex, load_knowledge
 
@@ -60,7 +63,7 @@ def main() -> int:
     a_index = VectorIndex(DIM)
     a_index.add(a_vecs)
 
-    tmp_dir = Path(__file__).resolve().parent / "_selftest_idx"
+    tmp_dir = ROOT / "_selftest_idx"
     tmp_dir.mkdir(exist_ok=True)
     q_path, a_path = tmp_dir / "question.index", tmp_dir / "answer.index"
     q_index.save(q_path)

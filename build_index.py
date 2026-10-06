@@ -57,7 +57,7 @@ def main() -> int:
                   len(docs), q_index.ntotal, a_index.ntotal)
         return 1
 
-    log.info("完成。接下来可运行 eval_retrieval.py 查看检索效果")
+    log.info("完成。接下来可运行 tests/eval_retrieval.py 查看检索效果")
     return 0
 
 

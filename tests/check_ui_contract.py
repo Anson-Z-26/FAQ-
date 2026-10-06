@@ -10,7 +10,8 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+# 本脚本在 tests/ 下，前端源码在项目根目录的 frontend/
+ROOT = Path(__file__).resolve().parent.parent
 FE = ROOT / "frontend"
 
 

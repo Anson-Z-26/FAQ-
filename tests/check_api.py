@@ -1,12 +1,17 @@
 """一行命令验证 API Key 是否可用（并可顺带建索引）。
 
-用法：
-    venv\\Scripts\\python.exe check_api.py          # 只验证连通性
-    venv\\Scripts\\python.exe check_api.py --build  # 验证通过后直接建索引
+用法（在项目根目录执行）：
+    venv\\Scripts\\python.exe tests\\check_api.py          # 只验证连通性
+    venv\\Scripts\\python.exe tests\\check_api.py --build  # 验证通过后直接建索引
 
 它只发一次「你好」的请求，几乎不消耗额度。
 """
 import sys
+from pathlib import Path
+
+# 本脚本在 tests/ 下，项目根目录是其上一级。
+# 加入 sys.path 才能 import service（包）以及 build_index（根目录的模块）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from service import Settings, get_embedding
 
