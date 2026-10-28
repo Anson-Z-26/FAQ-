@@ -73,9 +73,16 @@ def main() -> int:
         print("    ✓ 全部有对应样式")
 
     # --- 4. 后端接口是否都被前端正确调用 ---
+    # 这里是后端实际暴露的路由清单。新增接口时要同步，否则检查会误报「不存在」。
     print("\n[4] 前端调用的后端接口")
     called = sorted(set(re.findall(r"fetch\('([^']+)'", js)))
-    available = {"/ask", "/health", "/ui-config", "/get_answer"}
+    available = {
+        "/ask",            # 问答主入口（多轮）
+        "/health",         # 服务与索引状态
+        "/ui-config",      # 前端配置
+        "/session/reset",  # 清空会话历史
+        "/get_answer",     # 只检索（旧接口，保留兼容）
+    }
     for c in called:
         hit = c in available
         ok &= hit

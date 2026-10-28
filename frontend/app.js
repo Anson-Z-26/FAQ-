@@ -3,7 +3,7 @@
    零依赖原生 JS。后端接口：
      GET  /ui-config  读取标题、查询地图地址等配置
      GET  /health     服务与索引状态
-     POST /ask        结构化检索结果
+     POST /ask        问答主入口（支持多轮：keep_history + session_id）
    ========================================================================== */
 'use strict';
 
@@ -22,9 +22,32 @@ const el = {
   form: $('ask-form'),
   input: $('query-input'),
   sendBtn: $('send-btn'),
+  newChatBtn: $('new-chat-btn'),
 };
 
 let busy = false;
+
+/* ------------------------------------------------------------ 会话状态 */
+
+// 会话 id 存在 sessionStorage：关掉标签页就清空，多标签页之间互不干扰。
+// 不用 localStorage 是刻意的——用户开两个标签页问不同的事，不该串到同一个会话。
+const SESSION_KEY = 'rag_session_id';
+
+function getSessionId() {
+  try {
+    return sessionStorage.getItem(SESSION_KEY) || '';
+  } catch (_) {
+    // 隐私模式下 sessionStorage 可能不可用，退化为单轮
+    return '';
+  }
+}
+
+function setSessionId(id) {
+  try {
+    if (id) sessionStorage.setItem(SESSION_KEY, id);
+    else sessionStorage.removeItem(SESSION_KEY);
+  } catch (_) { /* 忽略：退化为单轮 */ }
+}
 
 /* ------------------------------------------------------------------ 工具 */
 
@@ -94,6 +117,15 @@ function addBotMessage(payload) {
   wrap.className = 'msg bot';
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
+
+  // 多轮时如果查询被改写过，明确告诉用户「我按这个理解去查了」。
+  // 这很重要：改写错了用户能立刻发现，而不是对着莫名其妙的回答发懵。
+  if (payload.rewritten && payload.search_query) {
+    const rw = document.createElement('div');
+    rw.className = 'rewrite-hint';
+    rw.textContent = `已结合上文理解为：${payload.search_query}`;
+    bubble.appendChild(rw);
+  }
 
   if (!payload.matched) {
     const p = document.createElement('div');
@@ -198,10 +230,17 @@ async function ask(query) {
   addTyping();
 
   try {
+    const sid = getSessionId();
     const resp = await fetch('/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({
+        query,
+        // keep_history 始终为 true：前端就是要多轮对话。
+        // 首次提问时 sid 为空，服务端会新建会话并在响应里返回 id。
+        keep_history: true,
+        session_id: sid || null,
+      }),
     });
 
     removeTyping();
@@ -216,7 +255,10 @@ async function ask(query) {
       return;
     }
 
-    addBotMessage(await resp.json());
+    const data = await resp.json();
+    // 记住服务端给的会话 id，下一轮追问才能带上历史
+    if (data.session_id) setSessionId(data.session_id);
+    addBotMessage(data);
   } catch (err) {
     removeTyping();
     addErrorMessage(`无法连接服务：${err.message}。请确认服务已启动。`);
@@ -228,7 +270,48 @@ async function ask(query) {
   }
 }
 
+/** 开始新对话：清空服务端历史与本地会话 id，并重置界面 */
+async function startNewChat() {
+  const sid = getSessionId();
+  if (sid) {
+    try {
+      await fetch('/session/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid }),
+      });
+    } catch (_) { /* 清不掉也不影响本地重置 */ }
+  }
+  setSessionId('');
+  // 恢复初始空状态
+  el.messages.innerHTML = '';
+  el.messages.appendChild(buildEmptyState());
+  el.emptyState = $('empty-state');
+  initSuggestions(SUGGESTIONS);
+  el.input.value = '';
+  el.input.focus();
+  hideBanner();
+}
+
 /* -------------------------------------------------------- 初始化 */
+
+// 推荐问题。写死是因为前端不直连知识库；
+// 这些是知识库里确定存在的问法，点一下就能看到效果。
+const SUGGESTIONS = ['你是谁', '学校在哪', '宿舍条件怎么样', '校训是什么'];
+
+/** 重建初始空状态（「新对话」后要还原成刚打开的样子） */
+function buildEmptyState() {
+  const box = document.createElement('div');
+  box.className = 'empty-state';
+  box.id = 'empty-state';
+  box.innerHTML =
+    '<div class="empty-icon">💬</div>' +
+    '<h2>有什么可以帮您？</h2>' +
+    '<p>输入问题后，系统会从知识库中检索最相关内容并组织回答。' +
+    '支持连续追问，比如先问「宿舍条件怎么样」，再问「它有空调吗」。</p>' +
+    '<div class="suggestions" id="suggestions"></div>';
+  return box;
+}
 
 function initMapButton(mapUrl) {
   if (mapUrl) {
@@ -281,7 +364,7 @@ async function loadUiConfig() {
 
   // 推荐问题：直接取自知识库更贴切，但前端不直连知识库，
   // 这里给通用引导，避免写死与知识库不一致的内容。
-  initSuggestions(['你是谁', '学校在哪', '宿舍条件怎么样', '校训是什么']);
+  initSuggestions(SUGGESTIONS);
 }
 
 async function checkHealth() {
@@ -310,6 +393,10 @@ function init() {
   });
 
   el.statusBtn.addEventListener('click', checkHealth);
+
+  if (el.newChatBtn) {
+    el.newChatBtn.addEventListener('click', startNewChat);
+  }
 
   loadUiConfig();
   checkHealth();

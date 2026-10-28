@@ -359,22 +359,47 @@ class RAGService:
             for i, hit in enumerate(self.search(query), start=1)
         )
 
-    def answer(self, query: str) -> dict:
-        """完整问答：检索 → 精排 → 交给大模型生成自然语言回答。
+    def answer(self, query: str, history: list = None) -> dict:
+        """完整问答：查询改写 → 检索 → 精排 → 交给大模型生成自然语言回答。
 
         这是对外的主入口。返回结构里同时给出：
-          - answer  : 大模型生成的回答（未启用生成时是材料原文拼装）
-          - hits    : 命中的知识条目，供前端展示「依据」
-          - matched : 是否检索到相关内容，前端据此区分「没找到」和「回答为空」
+          - answer          : 大模型生成的回答（未启用生成时是材料原文拼装）
+          - hits            : 命中的知识条目，供前端展示「依据」
+          - matched         : 是否检索到相关内容，前端据此区分「没找到」和「回答为空」
+          - search_query    : 实际用于检索的查询（多轮时可能是改写后的）
+          - rewritten       : 是否发生了改写，前端可据此提示用户
 
         为什么把 hits 一起返回：用户需要有办法核对回答的依据。
         只给一段生成文本，出了问题无法追溯是检索错了还是模型编了。
-        """
-        hits = self.search(query)
 
+        多轮对话的关键在第一步「查询改写」：
+        追问（如「它有空调吗」）离开上文无法检索，必须先补全成
+        「宿舍有空调吗」再走向量匹配。详见 llm.REWRITE_PROMPT。
+        """
+        history = history or []
         llm = self.llm or LLM.from_config(self.settings)
+
+        # 第 1 步：需要时把追问改写成能独立检索的问题
+        search_query = query
+        rewritten = False
+        rewrite_error = ""
+        if history:
+            try:
+                candidate = llm.rewrite_query(query, history)
+                if candidate and candidate != query:
+                    search_query = candidate
+                    rewritten = True
+            except RuntimeError as e:
+                # 改写是增强环节，失败就用原问题继续，不让整个问答挂掉
+                log.warning("查询改写失败，使用原问题：%s", e)
+                rewrite_error = str(e)
+
+        # 第 2 步：检索（用可能已改写过的查询）
+        hits = self.search(search_query)
+
+        # 第 3 步：生成回答（带上文，让模型理解「它」指什么）
         try:
-            text = llm.generate(query, hits)
+            text = llm.generate(query, hits, history)
         except RuntimeError as e:
             # 生成失败不该让整个问答失败：退回材料原文，并记下原因
             log.warning("大模型生成失败，退回材料原文：%s", e)
@@ -385,6 +410,9 @@ class RAGService:
                 "matched": bool(hits),
                 "generated": False,
                 "generation_error": str(e),
+                "search_query": search_query,
+                "rewritten": rewritten,
+                "rewrite_error": rewrite_error,
             }
 
         return {
@@ -393,4 +421,7 @@ class RAGService:
             "matched": bool(hits),
             "generated": not isinstance(llm, NoopLLM),
             "generation_error": "",
+            "search_query": search_query,
+            "rewritten": rewritten,
+            "rewrite_error": rewrite_error,
         }

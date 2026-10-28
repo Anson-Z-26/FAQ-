@@ -53,18 +53,61 @@ SYSTEM_PROMPT = """你是一个校内知识问答助手，负责根据提供的�
 5. 用简洁自然的中文回答，直接说结论，不要说「根据参考材料」这类套话。
 6. 回答长度控制在 200 字以内，信息多时用分点列出。"""
 
+# 查询改写提示词。
+#
+# 这一步是让检索能工作的前提：检索层拿到的必须是一个**自包含**的问题，
+# 而追问里的「它」「那」「还有」离开上文就没有意义。
+#
+# 关键约束：
+#   1. 只改表述、补全省略，不得回答问题本身，也不得引入上文没有的新信息
+#   2. 已经是完整问题时原样返回（否则模型会把「学校在哪」改成别的东西，
+#      白白增加一次改写出错的机会）
+#   3. 让模型只输出改写后的那一句，不要解释——否则会把解释文本当成查询词
+REWRITE_PROMPT = """你是一个查询改写助手。你的任务是结合对话历史，把用户当前的问题改写成一句能独立检索的完整问题。
+
+规则：
+1. 如果当前问题已经完整、不依赖上文，**原样返回**原问题，不要做任何修改。
+2. 如果当前问题含指代（如「它」「这个」「那」）或省略了主语，结合历史补全。
+   例：历史在聊「宿舍条件」，当前问「它有空调吗」-> 改写为「宿舍有空调吗」
+3. 只改写表述，不要回答问题，不要引入历史中没有的新信息。
+4. 只输出改写后的那一句问题本身，不要加引号、不要解释、不要前缀。"""
+
+
+def build_history_block(history: list) -> str:
+    """把历史对话拼成提示词里的上文块。"""
+    if not history:
+        return ""
+    lines = []
+    for i, h in enumerate(history, start=1):
+        q = (h.get("question") or "").strip()
+        a = (h.get("answer") or "").strip()
+        lines.append(f"[第{i}轮]\n用户：{q}\n助手：{a}")
+    return "\n\n".join(lines)
+
 
 class LLM:
-    """大模型接口抽象。换模型/换供应商只需实现 generate。"""
+    """大模型接口抽象。换模型/换供应商只需实现 generate 与 rewrite_query。"""
 
-    def generate(self, question: str, contexts: list) -> str:
+    def generate(self, question: str, contexts: list, history: list = None) -> str:
         """根据问题与候选材料生成回答。
 
         参数：
             question : 用户原始问题
             contexts : 候选材料，每项至少含 question / answer 字段
+            history  : 最近几轮对话 [{question, answer}, ...]，可为空
         返回：
             自然语言回答；材料为空时返回 NO_CONTEXT_ANSWER。
+        """
+        raise NotImplementedError
+
+    def rewrite_query(self, question: str, history: list) -> str:
+        """把带指代的追问改写成能独立检索的问题。
+
+        例：
+            历史「宿舍条件怎么样」+ 当前「它有空调吗」
+            -> 「宿舍有空调吗」
+
+        没有历史时直接返回原问题，不浪费一次调用。
         """
         raise NotImplementedError
 
@@ -88,10 +131,15 @@ class NoopLLM(LLM):
     2. 上线生成前后只需改一个配置，代码结构不动
     """
 
-    def generate(self, question: str, contexts: list) -> str:
+    def generate(self, question: str, contexts: list, history: list = None) -> str:
         if not contexts:
             return NO_CONTEXT_ANSWER
         return "\n".join(f"· {c.get('answer', '')}" for c in contexts)
+
+    def rewrite_query(self, question: str, history: list) -> str:
+        # 不改写：没开模型时多轮指代无法消解，这里明确返回原问题，
+        # 由上层体现为「检索不到」，而不是假装解决了
+        return question
 
 
 def build_context_block(contexts: list) -> str:
@@ -118,27 +166,19 @@ class ChatLLM(LLM):
         self.settings = settings
         self.timeout = timeout or settings.llm_timeout
 
-    def generate(self, question: str, contexts: list) -> str:
-        if not contexts:
-            # 没材料就别浪费一次调用，也避免模型凭空作答
-            return NO_CONTEXT_ANSWER
+    def _chat(self, messages: list, *, max_tokens: int = None,
+              temperature: float = None) -> str:
+        """发一次 chat/completions，返回助手回复文本。
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"【参考材料】\n{build_context_block(contexts)}\n\n"
-                    f"【用户问题】\n{question}"
-                ),
-            },
-        ]
-
+        生成和查询改写都走这里，避免重复维护请求/解析逻辑。
+        """
         payload = {
             "model": self.settings.llm_model,
             "messages": messages,
-            "max_tokens": self.settings.llm_max_tokens,
-            "temperature": self.settings.llm_temperature,
+            "max_tokens": max_tokens or self.settings.llm_max_tokens,
+            "temperature": (
+                self.settings.llm_temperature if temperature is None else temperature
+            ),
         }
         if self.settings.llm_disable_thinking:
             payload["enable_thinking"] = False
@@ -168,6 +208,69 @@ class ChatLLM(LLM):
             # 思考模式下偶尔会把内容全放进 reasoning_content，content 为空
             raise RuntimeError("大模型返回了空回答（可能是思考模式未关闭）")
         return content
+
+    # ------------------------------------------------------------------
+    def generate(self, question: str, contexts: list, history: list = None) -> str:
+        if not contexts:
+            # 没材料就别浪费一次调用，也避免模型凭空作答
+            return NO_CONTEXT_ANSWER
+
+        # 多轮时把上文作为独立消息传进去，而不是拼进同一个字符串：
+        # 这样模型能分清哪些是「已经聊过的」、哪些是「这一轮要回答的」。
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for h in (history or []):
+            q = (h.get("question") or "").strip()
+            a = (h.get("answer") or "").strip()
+            if q:
+                messages.append({"role": "user", "content": q})
+            if a:
+                messages.append({"role": "assistant", "content": a})
+
+        messages.append({
+            "role": "user",
+            "content": (
+                f"【参考材料】\n{build_context_block(contexts)}\n\n"
+                f"【用户问题】\n{question}"
+            ),
+        })
+        return self._chat(messages)
+
+    def rewrite_query(self, question: str, history: list) -> str:
+        if not history:
+            # 第一轮没有上文可结合，省一次调用
+            return question
+
+        messages = [
+            {"role": "system", "content": REWRITE_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"【对话历史】\n{build_history_block(history)}\n\n"
+                    f"【当前问题】\n{question}\n\n"
+                    f"请输出改写后的那一句问题。"
+                ),
+            },
+        ]
+        # 改写只要一句话，token 给小、温度给 0 保证稳定
+        try:
+            text = self._chat(messages, max_tokens=120, temperature=0.0)
+        except RuntimeError as e:
+            # 改写失败不该让整个问答失败，退回原问题（检索可能失败，但流程不断）
+            log.warning("查询改写失败，使用原问题：%s", e)
+            return question
+
+        # 模型偶尔会加引号或「改写后：」这类前缀，这里清理掉
+        text = text.strip().strip('"').strip("'").strip()
+        for prefix in ("改写后：", "改写后:", "改写为：", "改写为:", "问题："):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+        text = text.splitlines()[0].strip() if text else ""
+
+        # 模型有时会把整段回答倒出来，长度异常就放弃改写结果
+        if not text or len(text) > 120:
+            log.warning("查询改写结果异常，使用原问题：%r", text[:80])
+            return question
+        return text
 
 
 def build_llm(settings: Settings = None) -> LLM:

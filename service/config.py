@@ -141,6 +141,12 @@ class Settings:
     # 实测关闭后不产生 reasoning token，延迟从约 2.2s 降到约 1.6s。
     llm_disable_thinking: bool
 
+    # --- 多轮对话 ---
+    # 会话保留最近多少轮历史交给模型（太多会稀释重点并推高 token）
+    max_turns: int
+    # 会话空闲多久后过期（秒），内存存储需要靠它控制增长
+    session_ttl_seconds: int
+
     max_batch_size: int
     index_dir: Path
     knowledge_path: Path
@@ -200,6 +206,10 @@ class Settings:
             llm_temperature=_env_float("LLM_TEMPERATURE", 0.3),
             llm_timeout=_env_int("LLM_TIMEOUT", 60),
             llm_disable_thinking=_env_bool("LLM_DISABLE_THINKING", True),
+            # 5 轮足够覆盖「追问 + 指代回指」的常见场景，再多收益递减
+            max_turns=_env_int("MAX_TURNS", 5),
+            # 30 分钟无活动即视为过期
+            session_ttl_seconds=_env_int("SESSION_TTL_SECONDS", 1800),
             # 接口单次 input 条数上限，本平台为 10
             max_batch_size=_env_int("MAX_BATCH_SIZE", 10),
             index_dir=_env_path("INDEX_DIR", "index"),

@@ -4,6 +4,7 @@ from .embedding import get_embedding, get_embeddings
 from .llm import ChatLLM, LLM, NoopLLM, build_llm
 from .rag import RAGService, load_knowledge
 from .rerank import DashScopeReranker, NoopReranker, Reranker, build_reranker
+from .session import Session, SessionStore, Turn
 from .vector_index import VectorIndex
 
 __all__ = [
@@ -21,4 +22,7 @@ __all__ = [
     "NoopLLM",
     "ChatLLM",
     "build_llm",
+    "Session",
+    "SessionStore",
+    "Turn",
 ]

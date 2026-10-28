@@ -261,6 +261,18 @@ body {
 
 /* ---------------- 生成的回答 ---------------- */
 
+/* 多轮改写提示：让用户知道系统按什么理解去检索了 */
+.rewrite-hint {
+  margin-bottom: 9px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: #eff8ff;
+  border: 1px solid #b2ddff;
+  color: #175cd3;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
 .answer-text {
   font-size: 15px;
   line-height: 1.75;
