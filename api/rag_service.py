@@ -33,6 +33,13 @@ class AnswerReq(BaseModel):
     query: str  # 客户端传递的用户问题文本
 
 
+class AskReq(BaseModel):
+    query: str
+    # 是否让大模型生成自然语言回答。默认跟随 .env 的 LLM_ENABLED；
+    # 显式传 false 可以只做检索（用于调试检索效果、或前端只想看依据）。
+    generate: bool | None = None
+
+
 @app.get("/health")
 async def health(req: Request):
     """健康检查。
@@ -56,6 +63,8 @@ async def health(req: Request):
         "question_index_count": q_count,
         "answer_index_count": a_count,
         "rerank_enabled": svc.settings.rerank_enabled,
+        "llm_enabled": svc.settings.llm_enabled,
+        "llm_model": svc.settings.llm_model if svc.settings.llm_enabled else "",
         "embedding_model": svc.settings.embedding_model,
         "hint": "" if ready else "索引与知识库条数不一致，请先运行 build_index.py",
     }
@@ -76,28 +85,48 @@ async def get_answer(request: AnswerReq, req: Request):
 
 
 @app.post("/ask")
-async def ask(request: AnswerReq, req: Request):
-    """结构化检索结果，供前端渲染。
+async def ask(request: AskReq, req: Request):
+    """问答主入口：检索 → 精排 → （可选）大模型生成自然语言回答。
 
-    与 /get_answer 的区别：/get_answer 返回拼好的上下文字符串（给大模型用），
-    这里返回结构化列表（给界面用），前端可以逐条展示、显示来源与匹配度。
-    保留 /get_answer 是为了不破坏已有调用方。
+    `generate` 不传时跟随 .env 的 LLM_ENABLED：
+      - 开启：返回模型生成的回答，并附带命中依据
+      - 关闭：直接返回命中的知识原文（不调模型，不会产生生成费用）
+
+    与 /get_answer 的区别：/get_answer 只做检索、返回拼好的上下文字符串；
+    这里是给界面用的完整问答，带结构化依据。保留 /get_answer 不破坏已有调用方。
     """
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="query不能为空")
+
+    svc = req.app.state.rag_service
+
+    # 未显式指定时，沿用配置里的开关
+    want_generate = svc.settings.llm_enabled if request.generate is None else request.generate
+
     try:
-        hits = await asyncio.to_thread(req.app.state.rag_service.search, request.query)
+        if want_generate:
+            result = await asyncio.to_thread(svc.answer, request.query)
+        else:
+            # 只检索，不调模型
+            hits = await asyncio.to_thread(svc.search, request.query)
+            result = {"answer": "", "hits": hits, "matched": bool(hits),
+                      "generated": False, "generation_error": ""}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
+    hits = result["hits"]
     return {
         "code": 0,
         "query": request.query,
+        # 生成后的回答。未启用生成或只做检索时为空字符串
+        "answer": result["answer"],
+        "generated": result["generated"],
+        "generation_error": result["generation_error"],
         "hit_count": len(hits),
         # 命中为空时前端要显示「没找到」而不是「空回答」，所以单独给个标记
-        "matched": len(hits) > 0,
+        "matched": result["matched"],
         "hits": [
             {
                 "question": h["question"],
@@ -126,6 +155,7 @@ async def ui_config(req: Request):
         "map_url": cfg.query_map_url,
         "map_enabled": bool(cfg.query_map_url),
         "rerank_enabled": cfg.rerank_enabled,
+        "llm_enabled": cfg.llm_enabled,
         "top_k": cfg.top_k,
     }
 

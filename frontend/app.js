@@ -73,7 +73,10 @@ function addTyping() {
   wrap.id = 'typing-msg';
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+  // 生成回答需要几秒，给出文字提示，避免用户以为卡住
+  bubble.innerHTML =
+    '<span class="typing"><i></i><i></i><i></i></span>' +
+    '<span class="typing-hint">正在检索并组织回答…</span>';
   wrap.appendChild(bubble);
   el.messages.appendChild(wrap);
   scrollToBottom();
@@ -98,42 +101,72 @@ function addBotMessage(payload) {
     p.textContent = '未在知识库中找到相关内容。可以换个说法再试，或补充相关知识点后重建索引。';
     bubble.appendChild(p);
   } else {
-    payload.hits.forEach((hit) => {
-      const card = document.createElement('div');
-      card.className = 'hit';
+    // 优先展示大模型生成的回答；没有生成时（未启用/只检索）退回材料列表
+    if (payload.answer) {
+      const ans = document.createElement('div');
+      ans.className = 'answer-text';
+      ans.textContent = payload.answer;
+      bubble.appendChild(ans);
 
-      const head = document.createElement('div');
-      head.className = 'hit-head';
-
-      const q = document.createElement('div');
-      q.className = 'hit-q';
-      q.textContent = hit.question;
-      head.appendChild(q);
-
-      // 匹配度：rerank 开启时展示 rerank 分数，否则展示向量相似度
-      const score = hit.rerank_score > 0 ? hit.rerank_score : hit.score;
-      const label = hit.rerank_score > 0 ? '精排' : '相似度';
-      const bScore = document.createElement('span');
-      bScore.className = 'badge';
-      bScore.textContent = `${label} ${score.toFixed(3)}`;
-      head.appendChild(bScore);
-
-      if (hit.variant_count > 1) {
-        const bVar = document.createElement('span');
-        bVar.className = 'badge src';
-        bVar.textContent = `${hit.variant_count} 个问法命中`;
-        head.appendChild(bVar);
+      if (payload.generation_error) {
+        const warn = document.createElement('div');
+        warn.className = 'gen-warn';
+        warn.textContent = '回答生成失败，以下为检索到的原始内容。';
+        bubble.appendChild(warn);
       }
+    }
 
-      card.appendChild(head);
+    // 依据知识条目折叠展示：默认收起，避免长列表淹没回答
+    if (payload.hits && payload.hits.length) {
+      const details = document.createElement('details');
+      details.className = 'sources';
 
-      const a = document.createElement('div');
-      a.className = 'hit-a';
-      a.textContent = hit.answer;
-      card.appendChild(a);
+      const summary = document.createElement('summary');
+      summary.textContent = `依据（${payload.hits.length} 条知识）`;
+      details.appendChild(summary);
 
-      bubble.appendChild(card);
-    });
+      payload.hits.forEach((hit) => {
+        const card = document.createElement('div');
+        card.className = 'hit';
+
+        const head = document.createElement('div');
+        head.className = 'hit-head';
+
+        const q = document.createElement('div');
+        q.className = 'hit-q';
+        q.textContent = hit.question;
+        head.appendChild(q);
+
+        // 匹配度：rerank 开启时展示 rerank 分数，否则展示向量相似度
+        const score = hit.rerank_score > 0 ? hit.rerank_score : hit.score;
+        const label = hit.rerank_score > 0 ? '精排' : '相似度';
+        const bScore = document.createElement('span');
+        bScore.className = 'badge';
+        bScore.textContent = `${label} ${score.toFixed(3)}`;
+        head.appendChild(bScore);
+
+        if (hit.variant_count > 1) {
+          const bVar = document.createElement('span');
+          bVar.className = 'badge src';
+          bVar.textContent = `${hit.variant_count} 个问法命中`;
+          head.appendChild(bVar);
+        }
+
+        card.appendChild(head);
+
+        const a = document.createElement('div');
+        a.className = 'hit-a';
+        a.textContent = hit.answer;
+        card.appendChild(a);
+
+        details.appendChild(card);
+      });
+
+      bubble.appendChild(details);
+
+      // 只有依据、没有生成回答时（LLM 未启用），默认展开，否则界面上什么都看不到
+      if (!payload.answer) details.open = true;
+    }
   }
 
   wrap.appendChild(bubble);

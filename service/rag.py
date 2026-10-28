@@ -33,6 +33,7 @@ from pathlib import Path
 
 from .config import Settings
 from .embedding import get_embedding
+from .llm import LLM, NoopLLM
 from .rerank import NoopReranker, Reranker
 from .vector_index import VectorIndex
 
@@ -62,7 +63,7 @@ class RAGService:
 
     def __init__(self, knowledge_list, question_index: VectorIndex,
                  answer_index: VectorIndex = None, *, settings: Settings = None,
-                 embed_fn=get_embedding, reranker: Reranker = None,
+                 embed_fn=get_embedding, reranker: Reranker = None, llm: LLM = None,
                  top_k: int = None, score_threshold: float = None,
                  answer_score_threshold: float = None, recall_k: int = None,
                  dedupe_keep: str = None, rerank_score_threshold: float = None):
@@ -70,6 +71,7 @@ class RAGService:
         embed_fn 契约：embed_fn(text, *, settings=...) -> np.ndarray，与 get_embedding 一致。
         answer_index 为 None 时退化为「只用问题索引」。
         reranker 为 None 时退化为「不过滤」，行为等价于 NoopReranker。
+        llm 为 None 时退化为「不外调模型」，由 NoopLLM 拼装材料原文。
         dedupe_keep 见 dedupe_by_answer()：best（默认）或 longest。
         """
         self.settings = settings or Settings.from_env()
@@ -78,6 +80,7 @@ class RAGService:
         self.answer_index = answer_index
         self.embed_fn = embed_fn
         self.reranker = reranker
+        self.llm = llm
         self.top_k = self.settings.top_k if top_k is None else top_k
         self.dedupe_keep = dedupe_keep or getattr(self.settings, "dedupe_keep", "best")
         self.rerank_score_threshold = (
@@ -98,8 +101,8 @@ class RAGService:
     # ------------------------------------------------------------------
     @classmethod
     def from_config(cls, settings: Settings = None, *, embed_fn=get_embedding,
-                    reranker: Reranker = None) -> "RAGService":
-        """按 .env 配置装配好知识库和双索引。整个进程调用一次即可。"""
+                    reranker: Reranker = None, llm: LLM = None) -> "RAGService":
+        """按 .env 配置装配好知识库、双索引、rerank 与生成模型。整个进程调用一次即可。"""
         cfg = settings or Settings.from_env()
         q_index = VectorIndex.load(cfg.question_index_path, dim=cfg.embedding_dim)
 
@@ -115,6 +118,10 @@ class RAGService:
         if a_index is not None and len(a_index) == 0:
             log.warning("答案索引为空或不存在（%s），双路召回退化为单路。"
                         "请先运行 build_index.py", cfg.answer_index_path)
+        if cfg.llm_enabled:
+            log.info("回答生成已启用：%s", cfg.llm_model)
+        else:
+            log.info("回答生成未启用（LLM_ENABLED=false），将直接返回知识原文")
 
         return cls(
             knowledge_list=load_knowledge(cfg.knowledge_path),
@@ -123,6 +130,7 @@ class RAGService:
             settings=cfg,
             embed_fn=embed_fn,
             reranker=reranker if reranker is not None else Reranker.from_config(cfg),
+            llm=llm if llm is not None else LLM.from_config(cfg),
         )
 
     # ------------------------------------------------------------------
@@ -350,3 +358,39 @@ class RAGService:
             f"【参考知识 {i}】\n问题：{hit['question']}\n回答：{hit['answer']}"
             for i, hit in enumerate(self.search(query), start=1)
         )
+
+    def answer(self, query: str) -> dict:
+        """完整问答：检索 → 精排 → 交给大模型生成自然语言回答。
+
+        这是对外的主入口。返回结构里同时给出：
+          - answer  : 大模型生成的回答（未启用生成时是材料原文拼装）
+          - hits    : 命中的知识条目，供前端展示「依据」
+          - matched : 是否检索到相关内容，前端据此区分「没找到」和「回答为空」
+
+        为什么把 hits 一起返回：用户需要有办法核对回答的依据。
+        只给一段生成文本，出了问题无法追溯是检索错了还是模型编了。
+        """
+        hits = self.search(query)
+
+        llm = self.llm or LLM.from_config(self.settings)
+        try:
+            text = llm.generate(query, hits)
+        except RuntimeError as e:
+            # 生成失败不该让整个问答失败：退回材料原文，并记下原因
+            log.warning("大模型生成失败，退回材料原文：%s", e)
+            text = "\n".join(f"· {h['answer']}" for h in hits) if hits else ""
+            return {
+                "answer": text,
+                "hits": hits,
+                "matched": bool(hits),
+                "generated": False,
+                "generation_error": str(e),
+            }
+
+        return {
+            "answer": text,
+            "hits": hits,
+            "matched": bool(hits),
+            "generated": not isinstance(llm, NoopLLM),
+            "generation_error": "",
+        }

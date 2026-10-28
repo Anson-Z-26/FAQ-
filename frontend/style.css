@@ -259,6 +259,66 @@ body {
   margin-bottom: 6px;
 }
 
+/* ---------------- 生成的回答 ---------------- */
+
+.answer-text {
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gen-warn {
+  margin-top: 10px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: #fffaeb;
+  border: 1px solid #fedf89;
+  color: #b54708;
+  font-size: 12.5px;
+}
+
+/* 依据折叠区 */
+.sources {
+  margin-top: 14px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+
+.sources > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text-soft);
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 0;
+}
+.sources > summary::-webkit-details-marker { display: none; }
+
+.sources > summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: var(--text-faint);
+  transition: transform .15s;
+}
+.sources[open] > summary::before { content: "▾"; }
+
+.sources > summary:hover { color: var(--primary); }
+
+.sources .hit { margin-top: 8px; }
+
+/* 打字提示文字 */
+.typing-hint {
+  margin-left: 9px;
+  font-size: 13px;
+  color: var(--text-faint);
+  vertical-align: middle;
+}
+
 .hit-q {
   font-weight: 600;
   font-size: 13.5px;

@@ -85,6 +85,23 @@ def _normalize_rerank_url(raw: str) -> str:
     return url
 
 
+def _normalize_chat_url(raw: str) -> str:
+    """补全 chat completions 接口地址。
+
+    三种写法都接受：
+        .../compatible-mode/v1                      -> 补 /chat/completions
+        .../compatible-mode/v1/                     -> 同上
+        .../compatible-mode/v1/chat/completions     -> 原样返回
+    注意 chat 和 embedding 共用同一个 base_url，但路径后缀不同。
+    """
+    url = (raw or "").strip().rstrip("/")
+    if not url or url.endswith("/chat/completions"):
+        return url
+    if url.endswith("/compatible-mode/v1") or url.endswith("/v1"):
+        return f"{url}/chat/completions"
+    return url
+
+
 @dataclass(frozen=True)
 class Settings:
     """一次配置快照。构造后不可变，可安全地在多个对象间共享。"""
@@ -111,6 +128,18 @@ class Settings:
     # 开启 rerank 后用它做「要不要回答」的门槛。
     # 注意：这个分数与向量相似度 score 不同源，不能混用同一个阈值。
     rerank_score_threshold: float
+
+    # --- 大模型生成（检索之后才能用）---
+    # 关闭时 /ask 只返回检索到的知识原文；开启后才会生成自然语言回答。
+    llm_enabled: bool
+    llm_url: str
+    llm_model: str
+    llm_max_tokens: int
+    llm_temperature: float
+    llm_timeout: int
+    # 是否关闭深度思考。RAG 问答不需要思维链，
+    # 实测关闭后不产生 reasoning token，延迟从约 2.2s 降到约 1.6s。
+    llm_disable_thinking: bool
 
     max_batch_size: int
     index_dir: Path
@@ -161,6 +190,16 @@ class Settings:
             rerank_model=_first_env("RERANK_MODEL", default="qwen3-rerank"),
             # 实测：有效查询 rerank 最高分 0.49~0.94，噪声 0.26~0.29，0.40 卡在中间
             rerank_score_threshold=_env_float("RERANK_SCORE_THRESHOLD", 0.40),
+            # 默认关闭：没有配好模型时不该让 /ask 直接报错
+            llm_enabled=_env_bool("LLM_ENABLED", False),
+            llm_url=_normalize_chat_url(
+                _first_env("LLM_URL", default="https://maas.qianwenaiapi.com/compatible-mode/v1")
+            ),
+            llm_model=_first_env("LLM_MODEL", default="deepseek-v4.1-flash"),
+            llm_max_tokens=_env_int("LLM_MAX_TOKENS", 800),
+            llm_temperature=_env_float("LLM_TEMPERATURE", 0.3),
+            llm_timeout=_env_int("LLM_TIMEOUT", 60),
+            llm_disable_thinking=_env_bool("LLM_DISABLE_THINKING", True),
             # 接口单次 input 条数上限，本平台为 10
             max_batch_size=_env_int("MAX_BATCH_SIZE", 10),
             index_dir=_env_path("INDEX_DIR", "index"),
