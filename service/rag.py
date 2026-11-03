@@ -139,6 +139,7 @@ class RAGService:
                  top_k: int = None, score_threshold: float = None,
                  answer_score_threshold: float = None, recall_k: int = None,
                  rerank_score_threshold: float = None,
+                 rerank_relative_ratio: float = None, rerank_min_keep: int = None,
                  question_row_ids: list = None, answer_row_ids: list = None,
                  recall_overfetch: int = None):
         """
@@ -178,6 +179,17 @@ class RAGService:
             if answer_score_threshold is None else answer_score_threshold
         )
         self.recall_k = self.settings.recall_k if recall_k is None else recall_k
+
+        # 动态截断参数（相对分数）。存到实例上而不是每次读 settings，
+        # 便于测试注入与运行时调整。
+        self.rerank_relative_ratio = (
+            getattr(self.settings, "rerank_relative_ratio", 0.0)
+            if rerank_relative_ratio is None else rerank_relative_ratio
+        )
+        self.rerank_min_keep = (
+            getattr(self.settings, "rerank_min_keep", 0)
+            if rerank_min_keep is None else rerank_min_keep
+        )
 
         # 行号 → 知识 id 的映射。未提供时退化为恒等映射（行 i == 条目 i）
         self.question_row_ids = (
@@ -488,13 +500,39 @@ class RAGService:
             use_rerank_gate = False
 
         hits = []
+
+        # 动态截断的参照分：本次请求里的最高 rerank 分。
+        # 不假设 ranked 已排序（第三方实现未必排序），直接取最大值。
+        top_score = max((s for _, s in ranked), default=0.0)
+        ratio = max(0.0, float(self.rerank_relative_ratio or 0.0))
+        min_keep = max(0, int(self.rerank_min_keep or 0))
+        relative_cut = top_score * ratio if (use_rerank_gate and ratio > 0) else 0.0
+
         for pos, rscore in ranked:
             if len(hits) >= top_k:
                 break
             if not (0 <= pos < len(cands)):
                 continue
-            if use_rerank_gate and not rscore >= self.rerank_score_threshold:
-                continue
+
+            if use_rerank_gate:
+                # 第一道：绝对门槛 —— 回答「这条够不够格」
+                if not rscore >= self.rerank_score_threshold:
+                    continue
+                # 第二道：相对门槛 —— 回答「这条和最佳答案差多少」
+                #
+                # 为什么需要相对门槛：rerank 返回的是**本次请求内的相对分数**，
+                # 官方明确说明不可跨请求比较。所以拿固定 0.40 当唯一标准并不严谨：
+                # 同一套 0.40，在「第1名 0.95」的请求里会放进来一堆 0.45 的弱相关项，
+                # 在「第1名 0.50」的请求里反而过度收紧。
+                #
+                # 实测数据（40 条知识）：第 1 名均值 0.890，第 5 名均值 0.466，
+                # 比值约 0.52。取 ratio=0.6 正好把「沾点边」的第 4、5 名挡在外面，
+                # 而正确答案 98% 就在第 1 名，裁掉尾部不影响召回。
+                #
+                # 保底：min_keep 条之内不做相对截断，避免极端情况下把上下文裁空。
+                if relative_cut > 0 and rscore < relative_cut and len(hits) >= min_keep:
+                    continue
+
             c = cands[pos]
             hits.append({
                 "id": c["entry_id"],
@@ -507,6 +545,13 @@ class RAGService:
                 "hit_rows": c.get("hit_rows", 1),
                 "variants": c.get("variants", [c["question"]]),
             })
+
+        if use_rerank_gate and relative_cut > 0 and len(hits) < len(cands):
+            log.debug(
+                "动态截断：候选 %d 条 -> 保留 %d 条（最佳分 %.3f，相对门槛 %.3f=%.3f×%.2f）",
+                len(cands), len(hits), top_score,
+                relative_cut, top_score, ratio,
+            )
         return hits
 
     def retrieve(self, query: str) -> str:

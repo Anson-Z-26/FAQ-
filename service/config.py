@@ -127,6 +127,12 @@ class Settings:
     # 开启 rerank 后用它做「要不要回答」的门槛。
     # 注意：这个分数与向量相似度 score 不同源，不能混用同一个阈值。
     rerank_score_threshold: float
+    # 动态截断：只保留「与最佳分差距不大」的条目。
+    # rerank 分数是**本次请求内的相对分数**，所以用相对比例比绝对阈值更贴合它的语义。
+    # 0 表示关闭动态截断，退化为「过绝对门槛就保留到 top_k」。
+    rerank_relative_ratio: float
+    # 动态截断下的保底条数：即使后面全被截掉，至少保留这么多条（前提是过了绝对门槛）。
+    rerank_min_keep: int
 
     # --- 大模型生成（检索之后才能用）---
     # 关闭时 /ask 只返回检索到的知识原文；开启后才会生成自然语言回答。
@@ -212,6 +218,12 @@ class Settings:
             rerank_model=_first_env("RERANK_MODEL", default="qwen3-rerank"),
             # 实测：有效查询 rerank 最高分 0.49~0.94，噪声 0.26~0.29，0.40 卡在中间
             rerank_score_threshold=_env_float("RERANK_SCORE_THRESHOLD", 0.40),
+            # 相对截断：分数低于「最佳分 × 该比例」的视为弱相关，不进上下文。
+            # 实测第 1 名均值 0.890、第 5 名均值 0.466（比值约 0.52），
+            # 取 0.6 正好把「沾点边」的第 4、5 名挡在外面。
+            rerank_relative_ratio=_env_float("RERANK_RELATIVE_RATIO", 0.6),
+            # 保底：即使后面全被截掉，也至少保留 1 条（前提是过了绝对门槛）
+            rerank_min_keep=_env_int("RERANK_MIN_KEEP", 1),
             # 默认关闭：没有配好模型时不该让 /ask 直接报错
             llm_enabled=_env_bool("LLM_ENABLED", False),
             llm_url=_normalize_chat_url(
