@@ -2,7 +2,8 @@
 from .config import Settings
 from .embedding import get_embedding, get_embeddings
 from .llm import ChatLLM, LLM, NoopLLM, build_llm
-from .rag import RAGService, load_knowledge
+from .manifest import IndexManifest, build_manifest, entry_fingerprint
+from .rag import RAGService, index_by_id, knowledge_aliases, load_knowledge
 from .rerank import DashScopeReranker, NoopReranker, Reranker, build_reranker
 from .session import Session, SessionStore, Turn
 from .vector_index import VectorIndex
@@ -12,6 +13,8 @@ __all__ = [
     "RAGService",
     "VectorIndex",
     "load_knowledge",
+    "knowledge_aliases",
+    "index_by_id",
     "get_embedding",
     "get_embeddings",
     "Reranker",
@@ -25,4 +28,7 @@ __all__ = [
     "Session",
     "SessionStore",
     "Turn",
+    "IndexManifest",
+    "build_manifest",
+    "entry_fingerprint",
 ]

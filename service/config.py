@@ -117,9 +117,8 @@ class Settings:
     # 两条路的相似度分布不同，所以各自有独立阈值。
     score_threshold: float          # 问题索引阈值
     answer_score_threshold: float   # 答案索引阈值
-    recall_k: int                   # 每路各取多少候选，合并后交给 rerank
+    recall_k: int                   # 每路各取多少候选条目，合并后交给 rerank
     answer_index_enabled: bool      # 关掉则退化为「只用问题索引」
-    dedupe_keep: str                # 同答案多变体去重时保留哪个问法：best / longest
 
     # --- rerank（默认关闭）---
     rerank_enabled: bool
@@ -151,6 +150,15 @@ class Settings:
     index_dir: Path
     knowledge_path: Path
 
+    # --- 索引一致性 ---
+    # 索引清单校验不通过时是否拒绝启动。
+    # 默认 True：宁可起不来，也不要带着错位的索引对外返回错误答案。
+    # 只有在校验本身误报时才临时关掉，不要长期设 False。
+    strict_index_check: bool
+    # 召回时的「超取倍数」：多取一些行，按知识条目去重后再截到 recall_k。
+    # 因为有问法变体时，一条知识会占多个行；不超取会导致去重后候选不足。
+    recall_overfetch: int
+
     # --- 前端 ---
     # 「查询地图」跳转按钮的地址。留空时前端把按钮置灰并提示，
     # 不硬编码任何具体地图链接，等确定后再填。
@@ -166,6 +174,15 @@ class Settings:
     @property
     def answer_index_path(self) -> Path:
         return self.index_dir / "answer.index"
+
+    @property
+    def manifest_path(self) -> Path:
+        """索引清单：记录 FAISS 行号与知识条目的对应关系。
+
+        见 service/manifest.py —— 没有它，行号与知识条目会错位，
+        表现为「静默返回错误答案」。
+        """
+        return self.index_dir / "manifest.json"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -187,7 +204,6 @@ class Settings:
             answer_score_threshold=_env_float("ANSWER_SCORE_THRESHOLD", 0.35),
             recall_k=_env_int("RECALL_K", 10),
             answer_index_enabled=_env_bool("ANSWER_INDEX_ENABLED", True),
-            dedupe_keep=_first_env("DEDUPE_KEEP", default="best"),
             rerank_enabled=_env_bool("RERANK_ENABLED", False),
             rerank_url=_normalize_rerank_url(
                 _first_env("RERANK_URL",
@@ -214,6 +230,11 @@ class Settings:
             max_batch_size=_env_int("MAX_BATCH_SIZE", 10),
             index_dir=_env_path("INDEX_DIR", "index"),
             knowledge_path=_env_path("KNOWLEDGE_PATH", "db/data.json"),
+            # 索引与知识库不一致时默认拒绝启动，避免带错位索引对外服务
+            strict_index_check=_env_bool("STRICT_INDEX_CHECK", True),
+            # 一条知识有多个问法变体时，同一知识会占多个行，
+            # 所以要多取一些行再去重，否则去重后候选数不足
+            recall_overfetch=_env_int("RECALL_OVERFETCH", 3),
             # 留空即未配置，前端会禁用按钮
             query_map_url=_first_env("QUERY_MAP_URL", default=""),
             ui_title=_first_env("UI_TITLE", default="智能问答助手"),

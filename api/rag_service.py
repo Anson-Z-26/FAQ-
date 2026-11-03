@@ -64,29 +64,58 @@ class AskReq(BaseModel):
 async def health(req: Request):
     """健康检查。
 
-    特意把索引条数暴露出来：索引没建好时服务照样能启动、接口也返回 200，
+    刻意暴露索引规模：索引没建好时服务照样能启动、接口也返回 200，
     但检索结果永远是空的。这种「安静失败」最难排查，所以让 /health 能看出来。
+
+    注意就绪判断**不能**用「问题索引行数 == 知识条数」：
+    有问法变体后一条知识对应多个索引行（40 条知识 → 164 行），
+    那个等式永远不成立。正确判据是：
+      - 答案索引行数 == 知识条数（一条知识一个答案向量）
+      - 问题索引行数 >= 知识条数（多了的是问法变体）
+      - 行映射长度与索引行数一致（否则必然错位）
     """
     svc = req.app.state.rag_service
     doc_count = len(svc.knowledge_list)
     q_count = len(svc.question_index)
     a_count = len(svc.answer_index) if svc.answer_index is not None else None
 
-    ready = q_count == doc_count and doc_count > 0
+    problems = []
+    if doc_count == 0:
+        problems.append("知识库为空")
+    if q_count == 0:
+        problems.append("问题索引为空，请先运行 build_index.py")
+    if q_count < doc_count:
+        problems.append(
+            f"问题索引只有 {q_count} 行，少于知识条数 {doc_count}，索引不完整"
+        )
     if a_count is not None and a_count != doc_count:
-        ready = False
+        problems.append(
+            f"答案索引 {a_count} 行与知识条数 {doc_count} 不一致，请重建索引"
+        )
+    if len(svc.question_row_ids) != q_count:
+        problems.append(
+            f"问题索引行映射长度 {len(svc.question_row_ids)} 与索引 {q_count} 行不一致，"
+            f"会返回错误答案，请重建索引"
+        )
+    if a_count is not None and len(svc.answer_row_ids) != a_count:
+        problems.append(
+            f"答案索引行映射长度 {len(svc.answer_row_ids)} 与索引 {a_count} 行不一致"
+        )
 
+    ready = not problems
     return {
         "code": 0,
         "ready": ready,
         "knowledge_count": doc_count,
         "question_index_count": q_count,
+        # 有问法变体时问题索引行数会大于知识条数，两者都报出来便于判断
+        "question_alias_rows": max(0, q_count - doc_count),
         "answer_index_count": a_count,
         "rerank_enabled": svc.settings.rerank_enabled,
         "llm_enabled": svc.settings.llm_enabled,
         "llm_model": svc.settings.llm_model if svc.settings.llm_enabled else "",
         "embedding_model": svc.settings.embedding_model,
-        "hint": "" if ready else "索引与知识库条数不一致，请先运行 build_index.py",
+        "hint": "；".join(problems),
     }
 
 
@@ -196,12 +225,16 @@ async def ask(request: AskReq, req: Request):
         "matched": result["matched"],
         "hits": [
             {
+                # 知识 id：前端据此做去重、跳转、埋点，也是排查时定位条目的依据
+                "id": h.get("id", ""),
                 "question": h["question"],
                 "answer": h["answer"],
                 "score": round(float(h.get("score", 0.0)), 4),
                 "rerank_score": round(float(h.get("rerank_score", 0.0)), 4),
                 "source": h.get("source", ""),
-                "variant_count": h.get("variant_count", 1),
+                # 这条知识命中了几个向量（条目本身 + 若干问法变体）
+                "hit_rows": h.get("hit_rows", 1),
+                "variants": h.get("variants", []),
             }
             for h in hits
         ],

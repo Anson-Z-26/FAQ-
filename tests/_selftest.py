@@ -19,7 +19,15 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from service import NoopReranker, RAGService, Reranker, Settings, VectorIndex, load_knowledge
+from service import (
+    NoopReranker,
+    RAGService,
+    Reranker,
+    Settings,
+    VectorIndex,
+    knowledge_aliases,
+    load_knowledge,
+)
 
 DIM = 1024
 
@@ -51,12 +59,23 @@ class RecordingReranker(Reranker):
 def main() -> int:
     cfg = Settings.from_env()
     docs = load_knowledge(cfg.knowledge_path)
-    print(f"[1] 知识库读取成功：{len(docs)} 条")
+    print(f"[1] 知识库读取成功：{len(docs)} 条，"
+          f"别名 {sum(len(knowledge_aliases(d)) for d in docs)} 个")
 
     # --- 问题 / 答案分别向量化，模拟 build_index.py 的流程 ---
-    q_vecs = np.stack([fake_embed(d["question"]) for d in docs])
-    a_vecs = np.stack([fake_embed(d["answer"]) for d in docs])
-    print(f"[2] 问题向量 {q_vecs.shape}  答案向量 {a_vecs.shape}（两份独立向量）")
+    # 问题索引要包含每条知识的 question + 每个 alias（各自一个向量），
+    # 这样才有多个索引行指向同一个条目，能验证「按条目去重」。
+    q_texts, q_row_ids = [], []
+    for d in docs:
+        q_texts.append(d["question"]); q_row_ids.append(d["id"])
+        for a in knowledge_aliases(d):
+            q_texts.append(a); q_row_ids.append(d["id"])
+    a_texts = [d["answer"] for d in docs]
+    a_row_ids = [d["id"] for d in docs]
+
+    q_vecs = np.stack([fake_embed(t) for t in q_texts])
+    a_vecs = np.stack([fake_embed(t) for t in a_texts])
+    print(f"[2] 问题向量 {q_vecs.shape}（含别名）  答案向量 {a_vecs.shape}")
 
     q_index = VectorIndex(DIM)
     q_index.add(q_vecs)
@@ -70,7 +89,7 @@ def main() -> int:
     a_index.save(a_path)
     print(f"[3] 双索引写出成功：{q_path.name}={q_index.ntotal}  {a_path.name}={a_index.ntotal}")
 
-    # --- 模拟服务启动：从磁盘重新加载两个索引 ---
+    # --- 模拟服务启动：从磁盘重新加载两个索引，并带上行映射 ---
     svc = RAGService(
         knowledge_list=load_knowledge(cfg.knowledge_path),
         question_index=VectorIndex.load(q_path, dim=DIM),
@@ -78,24 +97,35 @@ def main() -> int:
         settings=cfg,
         embed_fn=fake_embed,
         reranker=NoopReranker(),
+        question_row_ids=q_row_ids,
+        answer_row_ids=a_row_ids,
     )
-    print(f"[4] RAGService 装配成功：问题索引={len(svc.question_index)} "
-          f"答案索引={len(svc.answer_index)}")
+    print(f"[4] RAGService 装配成功：问题索引={len(svc.question_index)} 行，"
+          f"答案索引={len(svc.answer_index)} 行，知识 {len(svc.knowledge_list)} 条")
+
+    # --- 行映射长度必须与索引行数一致，否则一定错位 ---
+    assert len(svc.question_row_ids) == len(svc.question_index)
+    assert len(svc.answer_row_ids) == len(svc.answer_index)
+    assert len(svc.question_index) > len(svc.knowledge_list), "问题索引应因别名而多于知识条数"
+    print(f"[5] 行映射长度与索引一致（问题 {len(svc.question_row_ids)} 行 "
+          f"-> {len(svc.knowledge_list)} 条知识）")
 
     # --- 双路召回：确认两路都在工作并带 source 标注 ---
     svc.score_threshold = 0.0          # 假向量无语义，放开阈值才能看到召回行为
     svc.answer_score_threshold = 0.0
     cands = svc.candidates("你是谁")
     sources = sorted({c["source"] for c in cands})
-    print(f"[5] 双路召回返回 {len(cands)} 条候选，来源标注={sources}")
+    print(f"[6] 双路召回返回 {len(cands)} 条候选，来源标注={sources}")
     assert any("question" in c["source"] for c in cands), "问题索引这一路没工作"
     assert any("answer" in c["source"] for c in cands), "答案索引这一路没工作"
 
-    # --- 验证合并去重：同一 doc_idx 不应重复出现 ---
-    idxs = [c["doc_idx"] for c in cands]
-    assert len(idxs) == len(set(idxs)), f"合并去重失败，出现重复下标: {idxs}"
-    dup = [c for c in cands if len(c["path_scores"]) > 1]
-    print(f"[6] 合并去重正确（无重复下标）；两路都命中的条目 {len(dup)} 条")
+    # --- 按知识条目去重：同一 id 只能出现一次 ---
+    ids = [c["entry_id"] for c in cands]
+    assert len(ids) == len(set(ids)), f"按条目去重失败，出现重复 id: {ids}"
+    multi = [c for c in cands if c["hit_rows"] > 1]
+    assert multi, "没有任何条目因别名命中多行，去重逻辑没被真正验证到"
+    print(f"[7] 按条目去重正确（无重复 id）；其中 {len(multi)} 条知识命中了多个向量，"
+          f"最多一条命中 {max(c['hit_rows'] for c in cands)} 行")
 
     # --- 验证 rerank 顺序被采用，且发生在截断之前 ---
     rec = RecordingReranker()
@@ -103,7 +133,7 @@ def main() -> int:
     svc.top_k = 3
     hits = svc.search("你是谁")
     call = rec.calls[-1]
-    print(f"[7] rerank 被调用：候选 {call['n_docs']} 条 → top_n={call['top_n']}")
+    print(f"[8] rerank 被调用：候选 {call['n_docs']} 条 → top_n={call['top_n']}")
     print(f"    返回 {len(hits)} 条，首条={hits[0]['question']!r}（倒序 rerank 的首条）")
     assert call["n_docs"] == len(cands), "rerank 拿到的候选数与召回数不一致"
     assert len(hits) <= 3, "top_k 截断失效"
@@ -117,29 +147,45 @@ def main() -> int:
 
     svc.reranker = BrokenReranker()
     hits2 = svc.search("你是谁")
-    print(f"[8] rerank 异常时降级成功，仍返回 {len(hits2)} 条（未中断检索）")
+    print(f"[9] rerank 异常时降级成功，仍返回 {len(hits2)} 条（未中断检索）")
     assert len(hits2) > 0
 
     # --- 缺失答案索引时应退化为单路，而不是崩 ---
     svc.answer_index = None
     cands_single = svc.candidates("你是谁")
-    print(f"[9] 缺少答案索引时退化为单路，仍召回 {len(cands_single)} 条")
+    print(f"[10] 缺少答案索引时退化为单路，仍召回 {len(cands_single)} 条")
+
+    # --- 行映射长度与索引不一致时必须立刻报错，而不是静默错位 ---
+    svc.answer_index = a_index
+    try:
+        RAGService(
+            knowledge_list=docs,
+            question_index=q_index,
+            answer_index=a_index,
+            settings=cfg,
+            embed_fn=fake_embed,
+            question_row_ids=q_row_ids[:-5],   # 故意少 5 行
+            answer_row_ids=a_row_ids,
+        )
+        print("[11] 行映射长度不符却未报错 <-- BUG（会导致静默返回错误答案）")
+        return 1
+    except RuntimeError as e:
+        print(f"[11] 行映射长度不符被拦截：{str(e)[:60]}...")
 
     # --- 参数校验 ---
-    svc.answer_index = a_index
     for bad in ["", "   "]:
         try:
             svc.search(bad)
-            print(f"[10] 空 query {bad!r} 未被拦截 <-- BUG")
+            print(f"[12] 空 query {bad!r} 未被拦截 <-- BUG")
         except ValueError:
-            print(f"[10] 空 query {bad!r} 被正确拦截")
+            print(f"[12] 空 query {bad!r} 被正确拦截")
 
     # --- 清理 ---
     q_path.unlink(missing_ok=True)
     a_path.unlink(missing_ok=True)
     tmp_dir.rmdir()
 
-    print("\n全部离线检查通过：双索引 + 双路召回 + rerank 插拔链路无阻塞。")
+    print("\n全部离线检查通过：双索引 + 别名多向量 + 按条目去重 + rerank 插拔链路无阻塞。")
     return 0
 
 

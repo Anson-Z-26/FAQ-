@@ -1,105 +1,150 @@
-"""验证「按答案去重」：构造同答案多变体的语料，检查去重行为。
+"""验证「按知识条目去重」：一条知识有多个问法变体时，只能占一个候选位。
 
-去重解决的问题：给一条知识补多个问法变体时必须拆成多行（每个变体一个尖锐向量），
-但多条变体常同时命中，会一起挤占 top_k 并把同一段答案重复拼进上下文。
+## 背景
+
+有问法变体后，问题索引是「一条知识 = 多个向量」：
+
+    KB001 "宿舍条件怎么样"  -> 1 个向量
+    KB001 "宿舍有空调吗"    -> 1 个向量
+    KB001 "住宿环境好不好"  -> 1 个向量
+
+一次查询可能同时命中同一个条目的多个向量。如果不去重，`top_k=5` 会被一两条
+知识占满，其他相关知识点根本进不来，而且同一段答案会在上下文里重复出现。
+
+## 本脚本验证三件事
+
+1. 同一 id 在候选列表里只出现一次
+2. `hit_rows` 正确记录「这条知识命中了几个向量」
+3. `variants` 记录实际命中的问法文本（便于排查为什么召回）
+
+## 备注：为什么不再按答案文本去重
+
+旧实现用 `dedupe_by_answer` 把「答案文本相同」的不同条目合并成一条。
+实测这会把真正不同的知识误合（评测从 96% 掉到 65%），因为业务上
+两条不同知识完全可能给出相同的答案文本。现在每条知识有唯一 id，
+按 id 去重既安全又准确。
 """
 import sys
 from pathlib import Path
 
-# 本脚本在 tests/ 下，项目根目录是其上一级；加入 sys.path 才能 import service
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from service import NoopReranker, RAGService, Settings
+from service import NoopReranker, RAGService, Settings, VectorIndex
 
-# 模拟：宿舍这条知识有 3 个问法变体，答案完全相同
+# 每条知识带 id 与 aliases。
+# 注意 DOC4 与 DOC2 的答案文本**故意相同**，用来验证「不再按答案文本合并」。
 DOCS = [
-    {"question": "你是谁", "answer": "我是智能问答助手。"},
-    {"question": "宿舍条件怎么样", "answer": "宿舍条件良好，配备了基本生活设施。"},
-    {"question": "宿舍有空调吗", "answer": "宿舍条件良好，配备了基本生活设施。"},
-    {"question": "宿舍能洗澡吗", "answer": "宿舍条件良好，配备了基本生活设施。"},
-    {"question": "食堂怎么样", "answer": "食堂环境整洁，菜品丰富。"},
+    {
+        "id": "DOC1",
+        "question": "宿舍条件怎么样",
+        "aliases": ["宿舍有空调吗", "住宿环境好不好"],
+        "answer": "宿舍条件良好，配备了基本生活设施。",
+    },
+    {
+        "id": "DOC2",
+        "question": "食堂怎么样",
+        "aliases": ["食堂好吃吗"],
+        "answer": "食堂环境整洁，菜品丰富。",
+    },
+    {
+        "id": "DOC3",
+        "question": "图书馆几点开门",
+        "aliases": [],
+        "answer": "图书馆每天 8:00 开放。",
+    },
+    {
+        "id": "DOC4",
+        "question": "宿舍几点熄灯",
+        "aliases": [],
+        # 与 DOC2 答案完全相同，但这是另一条知识，不该被合并掉
+        "answer": "食堂环境整洁，菜品丰富。",
+    },
 ]
+
+DIM = 32
+
+
+def fake_embed(text, *, settings=None, **kw):
+    """确定性假向量：按字做哈希桶，保证不同文本落在不同位置。"""
+    v = np.zeros(DIM, dtype=np.float32)
+    for ch in str(text):
+        v[ord(ch) % DIM] += 1.0
+    if not v.any():
+        v[0] = 1.0
+    return v
+
+
+def build_service(cfg):
+    q_texts, q_row_ids = [], []
+    for d in DOCS:
+        q_texts.append(d["question"]); q_row_ids.append(d["id"])
+        for a in d["aliases"]:
+            q_texts.append(a); q_row_ids.append(d["id"])
+
+    q_index = VectorIndex(DIM)
+    q_index.add(np.stack([fake_embed(t) for t in q_texts]))
+
+    return RAGService(
+        knowledge_list=DOCS,
+        question_index=q_index,
+        answer_index=None,
+        settings=cfg,
+        embed_fn=fake_embed,
+        reranker=NoopReranker(),
+        top_k=2,
+        score_threshold=0.0,
+        recall_k=10,
+        question_row_ids=q_row_ids,
+    ), len(q_texts)
 
 
 def main() -> int:
     cfg = Settings.from_env()
-    print("语料：5 行，其中 3 行是「宿舍」的同一答案变体\n")
+    svc, n_rows = build_service(cfg)
 
-    # ---------- 1. dedupe_by_answer 纯函数测试 ----------
-    cands = [
-        {"question": "宿舍有空调吗", "answer": "A", "score": 0.9,
-         "source": "question", "path_scores": {"question": 0.9}},
-        {"question": "宿舍条件怎么样", "answer": "A", "score": 0.8,
-         "source": "answer", "path_scores": {"answer": 0.8}},
-        {"question": "宿舍能洗澡吗", "answer": "A", "score": 0.7,
-         "source": "question", "path_scores": {"question": 0.7}},
-        {"question": "食堂怎么样", "answer": "B", "score": 0.6,
-         "source": "question", "path_scores": {"question": 0.6}},
-    ]
+    print(f"语料：{len(DOCS)} 条知识，问题索引 {n_rows} 行"
+          f"（{len(DOCS)} 个 question + "
+          f"{sum(len(d['aliases']) for d in DOCS)} 个别名）\n")
 
-    best = RAGService.dedupe_by_answer(cands, keep="best")
-    print("[1] keep=best：4 条候选（答案 A 占 3 条）->", len(best), "条")
-    for c in best:
-        print(f"    question={c['question']!r} score={c['score']} "
-              f"variant_count={c['variant_count']} source={c['source']}")
-    assert len(best) == 2, "应合并为 A、B 两条"
-    a = next(c for c in best if c["answer"] == "A")
-    assert a["variant_count"] == 3, "应记录被合并的变体数"
-    assert a["question"] == "宿舍有空调吗", "keep=best 应保留分数最高的变体"
-    # 两路分数应取并集
-    assert a["path_scores"] == {"question": 0.9, "answer": 0.8}, a["path_scores"]
-    assert a["source"] == "answer+question", a["source"]
-    print("    ✓ 合并正确：保留最高分变体、变体数=3、两路分数与来源已合并")
+    # ---------- 1. 同一 id 只出现一次 ----------
+    query = "宿舍"
+    cands = svc.candidates(query)
+    ids = [c["entry_id"] for c in cands]
+    print(f"[1] 查询 {query!r} -> {len(cands)} 条候选")
+    for c in cands:
+        print(f"    {c['entry_id']} 命中 {c['hit_rows']} 行  命中说法 {c['variants']}")
+    assert len(ids) == len(set(ids)), f"同一 id 出现了多次: {ids}"
+    print("    ✓ 无重复 id，同一知识只占一个候选位")
 
-    longest = RAGService.dedupe_by_answer(cands, keep="longest")
-    a2 = next(c for c in longest if c["answer"] == "A")
-    print(f"\n[2] keep=longest：A 的 question 拼接为 {a2['question']!r}")
-    assert a2["question"].count("/") == 2, "应把 3 个变体都拼进来"
-    print("    ✓ 三个变体问法都拼进来了，rerank 能看到更多问法")
+    # ---------- 2. 多变体应合并成一条，并记录命中行数 ----------
+    doc1 = next(c for c in cands if c["entry_id"] == "DOC1")
+    print(f"\n[2] DOC1 命中 {doc1['hit_rows']} 个向量，说法 {doc1['variants']}")
+    assert doc1["hit_rows"] > 1, "DOC1 应该被多个向量命中（question + 2 个别名）"
+    assert doc1["hit_rows"] == len(doc1["variants"]), "hit_rows 应与记录的说法数一致"
+    print("    ✓ 多变体已合并为一条，并记录了命中行数与具体说法")
 
-    # ---------- 2. 端到端：去重是否让 top_k 留出位子 ----------
-    def fake_embed(text, *, settings=None, **kw):
-        import numpy as np
-        v = np.zeros(16, dtype=np.float32)
-        for ch in str(text):
-            v[ord(ch) % 16] += 1.0
-        if not v.any():
-            v[0] = 1.0
-        return v
+    # ---------- 3. 不再按答案文本合并：DOC2 与 DOC4 答案相同但必须都存在 ----------
+    doc2 = next(c for c in cands if c["entry_id"] == "DOC2")
+    doc4 = next((c for c in cands if c["entry_id"] == "DOC4"), None)
+    merged_by_answer = doc4 is None
+    print(f"\n[3] DOC2 与 DOC4 答案文本相同")
+    print(f"    DOC2 存在: {doc2 is not None}   DOC4 存在: {doc4 is not None}")
+    assert not merged_by_answer, (
+        "DOC4 被按答案文本合并掉了！这正是旧 dedupe_by_answer 的缺陷 —— "
+        "两条不同知识可以给出相同答案文本，按文本合并会丢失知识"
+    )
+    print("    ✓ 两条不同知识都被保留（不按答案文本合并）")
 
-    from service import VectorIndex
-    import numpy as np
+    # ---------- 4. top_k 不被单条知识占满 ----------
+    hits = svc.search(query)
+    top_ids = [h["id"] for h in hits]
+    print(f"\n[4] top_k=2 的返回：{top_ids}")
+    assert len(set(top_ids)) == len(top_ids), "返回结果里有重复知识"
+    print("    ✓ 返回的每条知识互不相同")
 
-    qs = [d["question"] for d in DOCS]
-    vecs = np.stack([fake_embed(q) for q in qs])
-    idx = VectorIndex(vecs.shape[1])
-    idx.add(vecs)
-
-    svc = RAGService(knowledge_list=DOCS, question_index=idx, answer_index=None,
-                     settings=cfg, embed_fn=fake_embed, reranker=NoopReranker(),
-                     top_k=3, score_threshold=0.0, recall_k=10)
-    cands2 = svc.candidates("宿舍有空调吗")
-    n_dup = sum(1 for c in cands2 if c["answer"].startswith("宿舍条件良好"))
-    print(f"\n[3] 去重前候选 {len(cands2)} 条，其中宿舍变体 {n_dup} 条")
-
-    hits = svc.search("宿舍有空调吗")
-    answers = [h["answer"] for h in hits]
-    print(f"    去重后 top_k 返回 {len(hits)} 条：")
-    for h in hits:
-        print(f"      {h['question'][:24]!r}  variant_count={h['variant_count']}")
-    assert len(answers) == len(set(answers)), f"返回结果里仍有重复答案: {answers}"
-    print("    ✓ 返回结果内无重复答案，同一答案只占一个位子")
-
-    # 对比：不去重会怎样
-    raw = cands2[:3]
-    print(f"\n[4] 若不去重，top_k=3 会被前 3 条占满：")
-    for c in raw:
-        print(f"      {c['question'][:24]!r}")
-    dup_ratio = len({c['answer'] for c in raw}) / len(raw)
-    print(f"    → 3 个位子里只有 {len({c['answer'] for c in raw})} 个不同答案"
-          f"（有效率 {dup_ratio:.0%}）")
-
-    print("\n全部检查通过：按答案去重生效，且发生在 rerank 之前。")
+    print("\n全部检查通过：按知识条目去重生效，且不再按答案文本误合并。")
     return 0
 
 

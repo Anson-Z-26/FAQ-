@@ -2,14 +2,24 @@
 
 用法（需先启动服务）：
     venv\\Scripts\\python.exe tests\\check_ui.py
+    $env:BASE_URL="http://127.0.0.1:8001"; venv\\Scripts\\python.exe tests\\check_ui.py
 
-只发 HTTP 请求，不依赖本地文件路径，所以在哪个目录执行都可以。
+验证静态资源可访问、页面结构完整、/ui-config 与 /health 正常、
+/ask 返回结构化字段（含 id / hit_rows）。
 """
 import json
+import os
+import sys
+from pathlib import Path
 
 import requests
 
-BASE = "http://127.0.0.1:8000"
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from service import load_knowledge  # noqa: E402
+
+BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8000")
 
 
 def main():
@@ -40,14 +50,26 @@ def main():
                               ensure_ascii=False))
 
     print("\n== 5. /ask 结构化返回 ==")
-    for q in ["你是谁", "学校在哪", "今天天气怎么样"]:
+    # 查询取自知识库本身（第一条知识的原问法），避免写死问法后因知识库更换而失效
+    queries = []
+    try:
+        cfg_health = requests.get(BASE + "/health", timeout=30).json()
+        if cfg_health.get("knowledge_count"):
+            kb = ROOT / "db" / "data.json"
+            docs = load_knowledge(kb)
+            queries.append(docs[0]["question"])
+    except Exception as e:
+        print(f"  （读取知识库失败，使用默认查询: {e}）")
+    queries += ["今天天气怎么样"]   # 无关问题，预期拒答
+    for q in queries:
         r = requests.post(BASE + "/ask", json={"query": q}, timeout=120)
         d = r.json()
-        print(f"  {q!r:14s} HTTP {r.status_code} matched={d['matched']} hits={d['hit_count']}")
+        print(f"  {q!r:20s} HTTP {r.status_code} matched={d['matched']} "
+              f"hits={d['hit_count']}")
         for h in d["hits"][:2]:
-            rs = h["rerank_score"]
-            print(f"      [{rs:.3f}] {h['question'][:34]}")
-            print(f"              {h['answer'][:44]}")
+            print(f"      [{h.get('id','?')}] 精排{h['rerank_score']:.3f} "
+                  f"命中{h.get('hit_rows',1)}行 {h['question'][:30]}")
+            print(f"                  {h['answer'][:40]}")
 
     print("\n== 6. 参数校验 ==")
     r = requests.post(BASE + "/ask", json={"query": "   "}, timeout=30)
